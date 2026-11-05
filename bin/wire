@@ -121,19 +121,19 @@ def same_story(a, b):
     return len(names(a) & names(b)) >= 2
 
 
-def load_seen(fresh):
-    if fresh or not SEEN.exists():
+def load_seen(path, fresh):
+    if fresh or not path.exists():
         return set()
-    return set(SEEN.read_text().splitlines())
+    return set(path.read_text().splitlines())
 
 
-def remember(ids):
-    SEEN.parent.mkdir(parents=True, exist_ok=True)
-    with SEEN.open("a") as f:
+def remember(path, ids):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
         f.writelines(i + "\n" for i in ids)
-    lines = SEEN.read_text().splitlines()
+    lines = path.read_text().splitlines()
     if len(lines) > 5000:  # keep the file from growing forever
-        SEEN.write_text("\n".join(lines[-3000:]) + "\n")
+        path.write_text("\n".join(lines[-3000:]) + "\n")
 
 
 def poll(args, feeds, seen, headlines):
@@ -181,6 +181,10 @@ def main():
     p.add_argument("--fresh", action="store_true", help="ignore stories sent before, and don't remember these")
     p.add_argument("--skip", default=SKIP, metavar="REGEX",
                    help="skip headlines matching this, case-insensitive (deals and shopping by default; '' for none)")
+    p.add_argument("--seen", type=Path, default=SEEN, metavar="FILE",
+                   help="stories already sent, one id per line (~/.cache/dead-air/seen.txt)")
+    p.add_argument("--no-remember", action="store_true",
+                   help="read --seen but don't add to it; whoever plays the story writes its id there")
     p.add_argument("--list", action="store_true", help="print the default feeds and exit")
     args = p.parse_args()
 
@@ -196,7 +200,7 @@ def main():
             url = "http" + rest if sep else f
             feeds[url] = (name if sep else "") or urllib.parse.urlparse(url).netloc.removeprefix("www.")
 
-    seen, headlines, sent = load_seen(args.fresh), [], 0
+    seen, headlines, sent = load_seen(args.seen, args.fresh), [], 0
     while True:
         stories = poll(args, feeds, seen, headlines)
         err(f"{len(stories)} new stories")
@@ -206,8 +210,8 @@ def main():
                 print(json.dumps(it, ensure_ascii=False), flush=True)
             except BrokenPipeError:
                 return
-            if not args.fresh:
-                remember([it["id"]])
+            if not (args.fresh or args.no_remember):
+                remember(args.seen, [it["id"]])
             sent += 1
             if args.limit and sent >= args.limit:
                 return

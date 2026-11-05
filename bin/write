@@ -8,7 +8,7 @@
 Reads stories as JSON lines on stdin (from `wire`), has `afm` write a short spoken
 highlight of each, and prints one segment per line:
 
-    {"text", "headline", "source", "link", "ms"}
+    {"id", "text", "headline", "source", "link", "ms"}
 
 The code adds the credit ("From Ars Technica."), spells out symbols a listener can't
 hear, and cuts at the last whole sentence under --max-words. The model never names
@@ -134,7 +134,7 @@ def main():
             text = f"{credit(st['source'])} {text}"
         ms = round((time.time() - t0) * 1000)
         err(f"wrote in {ms} ms: {st['headline']}")
-        seg = {"text": text, "headline": st["headline"], "source": st.get("source", ""),
+        seg = {"id": st.get("id", ""), "text": text, "headline": st["headline"], "source": st.get("source", ""),
                "link": st.get("link", ""), "ms": ms}
         try:
             print(text if args.text else json.dumps(seg, ensure_ascii=False), flush=True)

@@ -10,6 +10,23 @@ dead-air              # new stories now, then every 5 minutes
 
 It needs macOS 26 with Apple Intelligence turned on, Xcode or the Command Line Tools (for `swiftc`), `uv`, and Ollama with a Phonon model.
 
+## The menu bar player
+
+```sh
+make install-app      # builds DeadAir.app into ~/Applications, plus everything `make install` does
+open ~/Applications/DeadAir.app
+```
+
+A radio icon goes in the menu bar. Click it for the player: what's on air and its source, the words being read, a progress bar, play/pause (space) and skip, "Open story ↗", what's up next, recent stories (click one to open it), the anchor's voice, and a switch for the station IDs.
+
+- It runs `dead-air-wire | dead-air-write` for the words, and does the voicing and playback itself: Phonon through Ollama into WAVs, played with `AVAudioPlayer`. That's what makes pause and skip work, which `afplay` can't do well.
+- It registers with Now Playing, so the keyboard's media keys, Control Center, and AirPods controls pause and skip it, and the headline shows up there.
+- `deadair://play`, `deadair://pause`, `deadair://toggle`, and `deadair://skip` control it from a script or a Shortcut. For "Hey Siri, play Dead Air", make a Shortcut with one Open URLs action set to `deadair://play`.
+- Nothing starts until you press play the first time. Quit stops the wire and writer with it.
+- A story counts as heard when it starts playing. The app writes its id to `~/.cache/dead-air/aired.txt` then, and runs wire with `--seen` on that file and `--no-remember`, so a story written but never played comes back next time. The CLI keeps its own list in `seen.txt`.
+- Logs from the app, wire, and write go to `~/.cache/dead-air/app.log`.
+- It's built with `swiftc` into a hand-made bundle and signed ad hoc, the same as `afm`. It's `DeadAir.app` on disk because make can't handle a space in a target name; the menu says "Dead Air". To start it at login, add it in System Settings → General → Login Items.
+
 ## The pieces
 
 Each stage reads stdin and writes stdout, so you can run any of them alone or swap one out.
@@ -21,6 +38,7 @@ Each stage reads stdin and writes stdout, so you can run any of them alone or sw
 | `dead-air-write` | stories | one spoken segment per line, JSON (`--text` for plain) |
 | `dead-air-speak` | lines of text or JSON | audio on the speakers, and each line as it starts playing |
 | `dead-air` | wire options | all three, piped together |
+| `DeadAir.app` | a click on the menu bar | the same station, with pause, skip, and media keys |
 
 ```sh
 echo "Explain DNS to a cat." | afm -i "One sentence."
