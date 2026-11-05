@@ -79,4 +79,8 @@ Apple's on-device model is about 3B parameters, and it shows.
 - It gets technical facts slightly wrong. It once said Go's assembler "turns Go code into machine code," and another time that OpenSSH "version 10.1 has been patched." Fine for a heads-up, not for anything you'd quote.
 - It sometimes names the outlet anyway ("The Verge shared the announcement post"), despite the rule.
 
-For better writing, the writer is one stage: swap `dead-air-write` for one that calls a bigger model, such as qwen3.8 on the 4090, and keep the rest. `~/code/phonon-tts` has the earlier newsroom that does that through Ollama.
+For better writing, the writer is one stage: swap `dead-air-write` for one that calls a bigger model, such as a 27B on a GPU box, and keep the rest. The [Phonon TTS bench](https://askscottpierce.com/phonon-tts) has the earlier newsroom that does that through Ollama.
+
+## License
+
+MIT. See `LICENSE`.
