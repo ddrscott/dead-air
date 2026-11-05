@@ -1,0 +1,144 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""speak: read lines aloud with Phonon (through Ollama), one after another, no dead air.
+
+Each line on stdin is one segment: plain text, or a JSON object with a "text" field
+(what `write` prints). The next segment is voiced while the current one plays, so
+there's no gap beyond --gap. Every --ident-every segments, a station ID with the
+time goes out in a second voice. Each line is printed to stdout as it starts playing.
+
+    echo "Hello from the newsroom." | speak
+    wire --follow 5 | write | speak
+    speak --voice Zoey < script.txt
+
+Needs Ollama with a Phonon model: `ollama pull phonon`.
+"""
+
+import argparse
+import json
+import queue
+import random
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+import wave
+from datetime import datetime
+from pathlib import Path
+
+IDENTS = [
+    "It's {time}. You're listening to {station}.",
+    "{station}. It's {time}, and the newsroom is still typing.",
+    "This is {station}, coming to you from a laptop that should probably be closed. It's {time}.",
+    "{time}. Still here? So are we. {station}.",
+    "{station}. Every word you hear was written on this machine, by a machine. It's {time}.",
+    "You're listening to {station}. If it goes quiet, check on us.",
+]
+RATE = 24000
+DONE = object()
+
+
+def err(msg):
+    print(f"speak {datetime.now():%H:%M:%S} {msg}", file=sys.stderr, flush=True)
+
+
+def voice(args, text, voice_name, out):
+    body = {"model": args.model, "voice": voice_name, "input": text, "response_format": "pcm"}
+    req = urllib.request.Request(args.ollama.rstrip("/") + "/v1/audio/speech", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        pcm = r.read()
+    # Phonon opens every request with ~200 ms of silence; keep 20 ms of it.
+    n = len(pcm) // 2
+    first = next((i for i in range(n) if abs(int.from_bytes(pcm[i * 2:i * 2 + 2], "little", signed=True)) > 1000), 0)
+    pcm = pcm[max(0, first - RATE // 50) * 2:]
+    with wave.open(str(out), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(pcm)
+    return len(pcm) / (2 * RATE)
+
+
+def ident(args):
+    now = datetime.now()
+    t = now.strftime("%-I:%M").replace(":00", " o'clock") if now.minute else now.strftime("%-I o'clock")
+    return random.choice(IDENTS).format(time=t, station=args.station)
+
+
+def producer(args, q, tmp):
+    """Read stdin, voice each segment, and hand the WAVs to the player. The queue's size
+    keeps it only --ahead segments ahead of what's on air."""
+    count = 0
+    for i, line in enumerate(sys.stdin):
+        line = line.strip()
+        if not line:
+            continue
+        text = line
+        if line.startswith("{"):
+            try:
+                text = json.loads(line).get("text", "")
+            except json.JSONDecodeError:
+                pass
+        if not text:
+            continue
+        jobs = []
+        if args.ident_every and count % args.ident_every == 0:
+            jobs.append((None, args.ident_voice))   # text decided at voicing time, so the clock is right
+        jobs.append((text, args.voice))
+        for j, (t, v) in enumerate(jobs):
+            t = t or ident(args)
+            out = tmp / f"{i:06d}-{j}-{v.split()[0]}.wav"
+            t0 = time.time()
+            try:
+                secs = voice(args, t, v, out)
+            except (urllib.error.URLError, TimeoutError) as e:
+                err(f"Phonon failed ({e}); is Ollama running at {args.ollama} with {args.model}?")
+                continue
+            err(f"voiced {secs:.1f} s in {round((time.time() - t0) * 1000)} ms")
+            q.put((t, out))
+        count += 1
+    q.put(DONE)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--voice", default="Easton", help="the anchor's voice (Easton)")
+    p.add_argument("--ident-voice", default="The Thing Under the Stairs", help="the station ID voice")
+    p.add_argument("--ident-every", type=int, default=4, metavar="N", help="station ID every N segments; 0 for none (4)")
+    p.add_argument("--station", default="Dead Air")
+    p.add_argument("--model", default="phonon:latest", help="Ollama speech model (phonon:latest)")
+    p.add_argument("--ollama", default="http://localhost:11434")
+    p.add_argument("--gap", type=float, default=0.6, help="seconds of quiet between segments (0.6)")
+    p.add_argument("--ahead", type=int, default=2, help="segments voiced ahead of air (2)")
+    p.add_argument("--save", metavar="DIR", help="keep each segment's WAV here")
+    args = p.parse_args()
+
+    q = queue.Queue(maxsize=args.ahead)
+    with tempfile.TemporaryDirectory(prefix="dead-air-") as d:
+        tmp = Path(args.save or d)
+        tmp.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=producer, args=(args, q, tmp), daemon=True).start()
+        while (item := q.get()) is not DONE:
+            text, wav = item
+            try:
+                print(text, flush=True)
+            except BrokenPipeError:
+                pass
+            subprocess.run(["afplay", str(wav)])
+            if not args.save:
+                wav.unlink(missing_ok=True)
+            time.sleep(args.gap)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

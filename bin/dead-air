@@ -1,0 +1,18 @@
+#!/bin/sh
+# dead-air: the whole station. Tech news from the wire, written on this Mac by Apple
+# Intelligence (afm), read aloud by Phonon. Options go to wire; see `wire --help`.
+#
+#   dead-air                  # new stories now, and every 5 minutes after
+#   dead-air --fresh          # start over, including stories already aired
+#   DEAD_AIR_VOICE=Zoey dead-air
+set -eu
+here=$(dirname "$(realpath "$0")")
+afm=$(command -v afm || echo "$here/../afm/afm")
+
+"$afm" --check >/dev/null || { echo "dead-air: Apple Intelligence isn't available (afm --check)" >&2; exit 69; }
+curl -sf "${OLLAMA:-http://localhost:11434}/api/tags" | grep -q '"phonon' ||
+  { echo "dead-air: no Phonon in Ollama; run: ollama pull phonon" >&2; exit 69; }
+
+"$here/wire" --follow "${DEAD_AIR_EVERY:-5}" "$@" |
+  "$here/write" --afm "$afm" |
+  "$here/speak" --voice "${DEAD_AIR_VOICE:-Easton}" --ollama "${OLLAMA:-http://localhost:11434}"

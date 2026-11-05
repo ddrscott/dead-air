@@ -1,0 +1,224 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""wire: tech news stories as JSON lines, one per story, with the article's own text.
+
+Reads RSS and Atom feeds, skips stories it has already sent (remembered in
+~/.cache/dead-air/seen.txt), stories over --max-age hours old, and stories whose
+headline shares two names with one already seen. Newest first, alternating
+sources, so one feed doesn't run the show.
+
+    wire                      # what's new right now, then exit
+    wire --follow 5           # and check again every 5 minutes, forever
+    wire --fresh --limit 3    # ignore what was sent before; just three stories
+
+Each line: {"id", "headline", "source", "link", "published", "summary", "text"}
+"""
+
+import argparse
+import concurrent.futures as cf
+import email.utils
+import html
+import json
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from pathlib import Path
+
+FEEDS = {
+    "https://hnrss.org/frontpage?points=150": "Hacker News",
+    "https://feeds.arstechnica.com/arstechnica/index": "Ars Technica",
+    "https://www.theverge.com/rss/index.xml": "The Verge",
+    "https://techcrunch.com/feed/": "TechCrunch",
+    "https://lobste.rs/rss": "Lobsters",
+    "https://simonwillison.net/atom/everything/": "Simon Willison",
+}
+SKIP = r"\$\d[\d,.]* off|\bdeals?\b|\bsale\b|discount|black friday|cyber monday|prime day|coupon|best .* to buy|gift guide"
+SEEN = Path.home() / ".cache/dead-air/seen.txt"
+UA = "Mozilla/5.0 (Macintosh) dead-air/1"
+ATOM = "{http://www.w3.org/2005/Atom}"
+# Capitalized words too common to say two headlines are the same story.
+COMMON = {"The", "A", "An", "In", "On", "At", "To", "For", "Of", "And", "As", "After", "With", "Is", "How",
+          "Why", "What", "New", "Show", "Ask", "HN", "Your", "You", "I", "My", "We", "It", "Its", "This"}
+
+
+def err(msg):
+    print(f"wire {datetime.now():%H:%M:%S} {msg}", file=sys.stderr, flush=True)
+
+
+def get(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def strip_tags(s):
+    s = re.sub(r"(?is)<(script|style|noscript|figure|figcaption)[^>]*>.*?</\1>", " ", s or "")
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s))).strip()
+
+
+def article(url, limit):
+    """The story's own paragraphs: every <p> long enough to be prose, without the site's menus."""
+    try:
+        page = get(url, timeout=10)
+    except Exception as e:
+        err(f"article failed {url}: {e}")
+        return ""
+    ps = [strip_tags(p) for p in re.findall(r"(?is)<p\b[^>]*>(.*?)</p>", page)]
+    return " ".join(p for p in ps if len(p) >= 60)[:limit]
+
+
+def when(text):
+    if not text:
+        return time.time()
+    try:
+        return email.utils.parsedate_to_datetime(text).timestamp()
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time()
+
+
+def read_feed(url, source):
+    root = ET.fromstring(get(url))
+    items = []
+    for it in root.iter("item"):  # RSS
+        link = (it.findtext("link") or "").strip()
+        items.append({
+            "id": (it.findtext("guid") or link or it.findtext("title") or "").strip(),
+            "headline": strip_tags(it.findtext("title")),
+            "link": link,
+            "published": when(it.findtext("pubDate")),
+            "summary": strip_tags(it.findtext("description"))[:600],
+        })
+    for it in root.iter(ATOM + "entry"):  # Atom
+        link = next((l.get("href") for l in it.findall(ATOM + "link") if l.get("rel", "alternate") == "alternate"), "")
+        items.append({
+            "id": (it.findtext(ATOM + "id") or link).strip(),
+            "headline": strip_tags(it.findtext(ATOM + "title")),
+            "link": link,
+            "published": when(it.findtext(ATOM + "published") or it.findtext(ATOM + "updated")),
+            "summary": strip_tags(it.findtext(ATOM + "summary") or it.findtext(ATOM + "content"))[:600],
+        })
+    for it in items:
+        it["source"] = source
+    return [it for it in items if it["headline"] and it["id"]]
+
+
+def names(headline):
+    return {w.strip("'’s,.:\"()") for w in headline.split() if w[:1].isupper()} - COMMON
+
+
+def same_story(a, b):
+    return len(names(a) & names(b)) >= 2
+
+
+def load_seen(fresh):
+    if fresh or not SEEN.exists():
+        return set()
+    return set(SEEN.read_text().splitlines())
+
+
+def remember(ids):
+    SEEN.parent.mkdir(parents=True, exist_ok=True)
+    with SEEN.open("a") as f:
+        f.writelines(i + "\n" for i in ids)
+    lines = SEEN.read_text().splitlines()
+    if len(lines) > 5000:  # keep the file from growing forever
+        SEEN.write_text("\n".join(lines[-3000:]) + "\n")
+
+
+def poll(args, feeds, seen, headlines):
+    with cf.ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda kv: (kv, _safe_read(*kv)), feeds.items()))
+    cutoff = time.time() - args.max_age * 3600
+    fresh = []
+    for (url, source), items in results:
+        for it in items:
+            if it["id"] in seen or it["published"] < cutoff or (args.skip and re.search(args.skip, it["headline"], re.I)):
+                continue
+            seen.add(it["id"])
+            if any(same_story(it["headline"], h) for h in headlines):
+                continue
+            headlines.append(it["headline"])
+            fresh.append(it)
+    fresh.sort(key=lambda it: -it["published"])
+    by_src = {}
+    for it in fresh:
+        by_src.setdefault(it["source"], []).append(it)
+    mixed = []
+    while any(by_src.values()):
+        for src in by_src:
+            if by_src[src]:
+                mixed.append(by_src[src].pop(0))
+    return mixed
+
+
+def _safe_read(url, source):
+    try:
+        return read_feed(url, source)
+    except Exception as e:
+        err(f"feed failed {url}: {e}")
+        return []
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--feed", action="append", metavar="[NAME=]URL",
+                   help="a feed to read, replacing the defaults (repeat it); NAME is how the anchor credits it")
+    p.add_argument("--follow", type=float, metavar="MIN", help="keep running, checking again every MIN minutes")
+    p.add_argument("--max-age", type=float, default=12, metavar="HOURS", help="skip older stories (12)")
+    p.add_argument("--limit", type=int, help="stop after this many stories")
+    p.add_argument("--chars", type=int, default=2500, help="article text to keep per story (2500)")
+    p.add_argument("--fresh", action="store_true", help="ignore stories sent before, and don't remember these")
+    p.add_argument("--skip", default=SKIP, metavar="REGEX",
+                   help="skip headlines matching this, case-insensitive (deals and shopping by default; '' for none)")
+    p.add_argument("--list", action="store_true", help="print the default feeds and exit")
+    args = p.parse_args()
+
+    if args.list:
+        for url, name in FEEDS.items():
+            print(f"{name}={url}")
+        return
+    feeds = FEEDS
+    if args.feed:
+        feeds = {}
+        for f in args.feed:
+            name, sep, rest = f.partition("=http")
+            url = "http" + rest if sep else f
+            feeds[url] = (name if sep else "") or urllib.parse.urlparse(url).netloc.removeprefix("www.")
+
+    seen, headlines, sent = load_seen(args.fresh), [], 0
+    while True:
+        stories = poll(args, feeds, seen, headlines)
+        err(f"{len(stories)} new stories")
+        for it in stories:
+            it["text"] = article(it["link"], args.chars) if it["link"] else ""
+            try:
+                print(json.dumps(it, ensure_ascii=False), flush=True)
+            except BrokenPipeError:
+                return
+            if not args.fresh:
+                remember([it["id"]])
+            sent += 1
+            if args.limit and sent >= args.limit:
+                return
+        del headlines[:-300]
+        if not args.follow:
+            return
+        time.sleep(args.follow * 60)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

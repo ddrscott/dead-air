@@ -1,0 +1,149 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""write: turn wire stories into spoken radio segments with Apple's on-device model.
+
+Reads stories as JSON lines on stdin (from `wire`), has `afm` write a short spoken
+highlight of each, and prints one segment per line:
+
+    {"text", "headline", "source", "link", "ms"}
+
+The code adds the credit ("From Ars Technica."), spells out symbols a listener can't
+hear, and cuts at the last whole sentence under --max-words. The model never names
+the source; left to itself it credits the wrong one.
+
+    wire --limit 3 | write
+    wire | write --text           # just the words, one segment per line
+"""
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+INSTRUCTIONS = """You are the anchor of {station}, a radio show about technology for software developers.
+Write a spoken highlight of the story you're given: three or four sentences, 50 to 70 words.
+
+Rules:
+- Say what happened first. End with one sentence on why it matters, in plain words.
+- Tell it in your own words; don't copy sentences from the article.
+- Use names, numbers, and products from the article. Never add a fact that isn't in the article.
+- Plain spoken sentences only. No markdown, lists, headings, emoji, or stage directions.
+- Don't say who reported it or name any news site.
+- Don't greet the listener and don't sign off.
+- Sound like a person talking to a coworker. Never use hype words like groundbreaking, revolutionary, game-changing, cutting-edge, exciting, or innovative.
+
+Reply with only the words to read on air."""
+
+HYPE = re.compile(r"\b(groundbreaking|revolutioni[sz]\w*|game[- ]chang\w*|cutting[- ]edge|innovative|exciting|"
+                  r"seamless\w*|unprecedented|transformative)\b", re.I)
+
+
+def err(msg):
+    print(f"write {datetime.now():%H:%M:%S} {msg}", file=sys.stderr, flush=True)
+
+
+def afm(args, prompt):
+    cmd = [args.afm, "-i", INSTRUCTIONS.format(station=args.station), "-t", str(args.temperature), "-n", "220"]
+    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=120)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def say_symbols(s):
+    s = re.sub(r"\$(\d[\d,.]*)\s*(billion|million|thousand|trillion)\b", r"\1 \2 dollars", s, flags=re.I)
+    s = re.sub(r"\$(\d[\d,.]*)", r"\1 dollars", s)
+    s = re.sub(r"(\d)\s*%", r"\1 percent", s)
+    s = s.replace("&", " and ").replace(" / ", " or ")
+    s = re.sub(r"\be\.g\.", "for example", s)
+    s = re.sub(r"\bi\.e\.", "that is", s)
+    return s
+
+
+def clean(text, max_words):
+    text = re.sub(r"(?m)^\s*(#+|[-*•]|\d+\.)\s+", "", text)    # headings, bullets
+    text = re.sub(r"[*_`#]+", "", text)                             # emphasis, code
+    text = re.sub(r"(?im)^(source|sources|headline|segment)\s*:.*$", "", text)
+    text = re.sub(r"\[[^\]]*\]|\([^)]*(laughs|pause|music)[^)]*\)", "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", say_symbols(text)).strip().strip('"')
+    sentences = re.findall(r"[^.!?]+[.!?]+[\"”']?", text) or [text]
+    out, n = [], 0
+    for s in sentences:
+        w = len(s.split())
+        if out and n + w > max_words:
+            break
+        out.append(s.strip())
+        n += w
+    return " ".join(out)
+
+
+def credit(source):
+    if source in ("Hacker News", "Lobsters"):
+        return f"Seen on {source}."
+    return f"From {source}."
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--station", default="Dead Air", help="the show's name, for the model (Dead Air)")
+    p.add_argument("--afm", default=shutil.which("afm") or "afm", help="path to the afm binary")
+    p.add_argument("--temperature", type=float, default=0.5)
+    p.add_argument("--max-words", type=int, default=80, help="cut at the last whole sentence under this (80)")
+    p.add_argument("--min-chars", type=int, default=200,
+                   help="skip stories with less article text and summary than this (200)")
+    p.add_argument("--text", action="store_true", help="print plain text, one segment per line, instead of JSON")
+    args = p.parse_args()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            st = json.loads(line)
+        except json.JSONDecodeError:
+            st = {"headline": line, "text": "", "summary": "", "source": ""}
+        body = st.get("text") or ""
+        summary = st.get("summary") or ""
+        if len(body) + len(summary) < args.min_chars:
+            err(f"skip, too thin: {st['headline']}")
+            continue
+        t0 = time.time()
+        text = ""
+        for chars in (len(body), 1200):   # retry with less article if the context overflows
+            prompt = f"Headline: {st['headline']}\nSummary: {summary}\n\nArticle: {body[:chars]}"
+            code, out, msg = afm(args, prompt)
+            if code == 0:
+                text = out
+                if HYPE.search(text):    # one more try; the small model loves a press release
+                    code2, out2, _ = afm(args, prompt + "\n\nWrite it plainly, with no hype words.")
+                    if code2 == 0 and not HYPE.search(out2):
+                        text = out2
+                break
+            err(f"afm exit {code} on {st['headline']!r}: {msg}")
+            if code != 3:
+                break
+        if not text:
+            continue
+        text = clean(text, args.max_words)
+        if st.get("source"):
+            text = f"{credit(st['source'])} {text}"
+        ms = round((time.time() - t0) * 1000)
+        err(f"wrote in {ms} ms: {st['headline']}")
+        seg = {"text": text, "headline": st["headline"], "source": st.get("source", ""),
+               "link": st.get("link", ""), "ms": ms}
+        try:
+            print(text if args.text else json.dumps(seg, ensure_ascii=False), flush=True)
+        except BrokenPipeError:
+            return
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
