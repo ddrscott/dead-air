@@ -29,7 +29,15 @@ install-app: install $(APPBIN)
 	rm -rf $(HOME)/Applications/DeadAir.app
 	cp -R $(APP) $(HOME)/Applications/
 
+# Developer ID signature, hardened runtime, notarized and stapled. See scripts/notarize.sh.
+notarize:
+	scripts/notarize.sh
+
+install-notarized: install notarize
+	rm -rf /Applications/DeadAir.app
+	ditto $(APP) /Applications/DeadAir.app
+
 clean:
 	rm -rf $(BIN) build
 
-.PHONY: all app install install-app clean
+.PHONY: all app install install-app notarize install-notarized clean

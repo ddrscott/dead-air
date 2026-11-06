@@ -13,8 +13,8 @@ It needs macOS 26 with Apple Intelligence turned on, Xcode or the Command Line T
 ## The menu bar player
 
 ```sh
-make install-app      # builds DeadAir.app into ~/Applications, plus everything `make install` does
-open ~/Applications/DeadAir.app
+make install-notarized   # signed, notarized DeadAir.app in /Applications, plus everything `make install` does
+open /Applications/DeadAir.app
 ```
 
 A radio icon goes in the menu bar. Click it for the player: what's on air and its source, the words being read, a progress bar, play/pause (space) and skip, "Open story ↗", what's up next, recent stories (click one to open it), the anchor's voice, and a switch for the station IDs.
@@ -25,7 +25,9 @@ A radio icon goes in the menu bar. Click it for the player: what's on air and it
 - Nothing starts until you press play the first time. Quit stops the wire and writer with it.
 - A story counts as heard when it starts playing. The app writes its id to `~/.cache/dead-air/aired.txt` then, and runs wire with `--seen` on that file and `--no-remember`, so a story written but never played comes back next time. The CLI keeps its own list in `seen.txt`.
 - Logs from the app, wire, and write go to `~/.cache/dead-air/app.log`.
-- It's built with `swiftc` into a hand-made bundle and signed ad hoc, the same as `afm`. It's `DeadAir.app` on disk because make can't handle a space in a target name; the menu says "Dead Air". To start it at login, add it in System Settings → General → Login Items.
+- `make install-notarized` builds it signed with a Developer ID and the hardened runtime, has Apple notarize it, staples the ticket, and installs it to `/Applications`. It uses the notarytool keychain profile in `NOTARY_PROFILE` (default `maxpane-notary`); `scripts/notarize.sh` says how to make one. Apple's check took about 3 minutes on 2026-11-06.
+- The app is only the player. It still needs `make install` for `dead-air-wire` and `dead-air-write` in `~/.local/bin`, plus `uv` and Ollama with Phonon, so it's not a download-and-run app for someone who hasn't cloned the repo.
+- `make install-app` is the quick local build: `swiftc` into a hand-made bundle, signed ad hoc, the same as `afm`, copied to `~/Applications`. It's `DeadAir.app` on disk because make can't handle a space in a target name; the menu says "Dead Air". To start it at login, add it in System Settings → General → Login Items.
 
 ## The pieces
 
