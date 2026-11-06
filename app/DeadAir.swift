@@ -52,6 +52,12 @@ struct Segment: Identifiable, Decodable, Equatable {
 
 struct Voiced { let seg: Segment; let wav: URL }
 
+func shortSource(_ s: String) -> String {
+    let known = ["Hacker News": "HN", "Ars Technica": "ARS", "The Verge": "VRG", "TechCrunch": "TC",
+                 "Lobsters": "LOB", "Simon Willison": "SW"]
+    return known[s] ?? String(s.prefix(3)).uppercased()
+}
+
 @MainActor
 final class Station: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = Station()
@@ -66,6 +72,9 @@ final class Station: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @AppStorage("voice") var voice = "Easton"
     @AppStorage("identVoice") var identVoice = "The Thing Under the Stairs"
     @AppStorage("idents") var identsOn = true
+    @AppStorage("volume") var volume = 0.8
+
+    func setVolume(_ v: Double) { player?.volume = Float(v) }
 
     let ollama = URL(string: "http://localhost:11434/v1/audio/speech")!
     private var pending: [Segment] = []
@@ -142,6 +151,7 @@ final class Station: NSObject, ObservableObject, AVAudioPlayerDelegate {
         do {
             let p = try AVAudioPlayer(contentsOf: v.wav)
             p.delegate = self
+            p.volume = Float(volume)
             p.play()
             player = p
             now = v.seg
@@ -391,6 +401,19 @@ struct PlayerView: View {
             }
             .buttonStyle(.bordered)
 
+            HStack(spacing: 8) {
+                Button { s.volume = s.volume > 0 ? 0 : 0.8; s.setVolume(s.volume) } label: {
+                    Image(systemName: speakerIcon).frame(width: 18)
+                }
+                .buttonStyle(.plain)
+                .help(s.volume > 0 ? "Mute" : "Unmute")
+                Slider(value: $s.volume, in: 0...1)
+                    .tint(orange)
+                    .onChange(of: s.volume) { _, v in s.setVolume(v) }
+                Text("\(Int((s.volume * 100).rounded()))").font(mono(10)).foregroundStyle(.secondary)
+                    .frame(width: 24, alignment: .trailing)
+            }
+
             Divider()
             Header(title: "UP_NEXT (\(s.upNext.count))")
             if s.upNext.isEmpty {
@@ -416,12 +439,21 @@ struct PlayerView: View {
         .frame(width: 360)
     }
 
+    var speakerIcon: String {
+        switch s.volume {
+        case 0: "speaker.slash.fill"
+        case ..<0.34: "speaker.wave.1.fill"
+        case ..<0.67: "speaker.wave.2.fill"
+        default: "speaker.wave.3.fill"
+        }
+    }
+
     func row(_ seg: Segment) -> some View {
         Button {
             if let url = URL(string: seg.link), !seg.link.isEmpty { NSWorkspace.shared.open(url) }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(String(seg.source.prefix(3)).uppercased()).font(mono(9, .bold)).foregroundStyle(.secondary)
+                Text(shortSource(seg.source)).font(mono(9, .bold)).foregroundStyle(.secondary)
                     .frame(width: 26, alignment: .leading)
                 Text(seg.headline).font(.system(size: 12)).lineLimit(1)
                 Spacer(minLength: 0)
@@ -434,6 +466,43 @@ struct PlayerView: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    // DEADAIR_SNAPSHOT=out.png draws the player with sample stories to a PNG and quits.
+    // It's how the README screenshot is made, and how to check the layout without clicking.
+    func applicationDidFinishLaunching(_ note: Notification) {
+        guard let path = ProcessInfo.processInfo.environment["DEADAIR_SNAPSHOT"] else { return }
+        MainActor.assumeIsolated {
+            let s = Station()
+            func seg(_ h: String, _ src: String, _ t: String = "") -> Segment {
+                Segment(id: h, text: t, headline: h, source: src, link: "https://example.com")
+            }
+            s.now = seg("Salon is shutting down after 31 years", "The Verge",
+                        "From The Verge. Salon, one of the first online-only news magazines, announced today that it's ceasing publication. The company said the business realities of independent digital journalism have changed profoundly over the years.")
+            s.playing = true
+            s.status = "On air"
+            s.duration = 26; s.elapsed = 11
+            s.upNext = [seg("Fox completes its $22B acquisition of Roku", "TechCrunch"),
+                        seg("A Quick Guide to Go's Assembler", "Lobsters"),
+                        seg("Software squeezes more data out of Webb Telescope", "Ars Technica")]
+            s.recent = [s.now!, seg("Kagi Search for Everyone", "Hacker News"), seg("Quoting Paul Ford", "Simon Willison")]
+            let host = NSHostingView(rootView: PlayerView(s: s)
+                .background(Color(red: 0.13, green: 0.12, blue: 0.11))
+                .environment(\.colorScheme, .dark))
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.frame.size = host.fittingSize
+            let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            win.contentView = host
+            win.appearance = NSAppearance(named: .darkAqua)
+            win.backgroundColor = .windowBackgroundColor
+            host.layoutSubtreeIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                exit(0)
+            }
+        }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated { urls.forEach(Station.shared.handle) }
     }

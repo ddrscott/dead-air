@@ -1,4 +1,4 @@
-# dead-air
+# <img src="docs/icon.png" width="64" align="center" alt=""> dead-air
 
 A tech news radio station that runs entirely on this Mac. It reads the tech feeds, Apple Intelligence's on-device model writes a short spoken highlight of each story, and Phonon reads it out loud through Ollama. Nothing goes to a cloud model, and nothing costs a token.
 
@@ -17,7 +17,9 @@ make install-notarized   # signed, notarized DeadAir.app in /Applications, plus 
 open /Applications/DeadAir.app
 ```
 
-A radio icon goes in the menu bar. Click it for the player: what's on air and its source, the words being read, a progress bar, play/pause (space) and skip, "Open story ↗", what's up next, recent stories (click one to open it), the anchor's voice, and a switch for the station IDs.
+<img src="docs/player.png" width="360" alt="The Dead Air player: what's on air, transport buttons, volume, up next, and recent stories">
+
+A radio icon goes in the menu bar. Click it for the player: what's on air and its source, the words being read, a progress bar, play/pause (space) and skip, "Open story ↗", a volume slider (click the speaker to mute), what's up next, recent stories (click one to open it), the anchor's voice, and a switch for the station IDs. The volume and voice are remembered between launches.
 
 - It runs `dead-air-wire | dead-air-write` for the words, and does the voicing and playback itself: Phonon through Ollama into WAVs, played with `AVAudioPlayer`. That's what makes pause and skip work, which `afplay` can't do well.
 - It registers with Now Playing, so the keyboard's media keys, Control Center, and AirPods controls pause and skip it, and the headline shows up there.
@@ -27,6 +29,8 @@ A radio icon goes in the menu bar. Click it for the player: what's on air and it
 - Logs from the app, wire, and write go to `~/.cache/dead-air/app.log`.
 - `make install-notarized` builds it signed with a Developer ID and the hardened runtime, has Apple notarize it, staples the ticket, and installs it to `/Applications`. It uses the notarytool keychain profile in `NOTARY_PROFILE` (default `maxpane-notary`); `scripts/notarize.sh` says how to make one. Apple's check took about 3 minutes on 2026-11-06.
 - The app is only the player. It still needs `make install` for `dead-air-wire` and `dead-air-write` in `~/.local/bin`, plus `uv` and Ollama with Phonon, so it's not a download-and-run app for someone who hasn't cloned the repo.
+- The app icon is drawn in code by `tools/make-icon.swift`: a Signal Orange flatline that breaks into a voice waveform. `make icon` redraws `app/AppIcon.icns`.
+- `DEADAIR_SNAPSHOT=out.png /Applications/DeadAir.app/Contents/MacOS/DeadAir` draws the player with sample stories to a PNG and quits. That's how `docs/player.png` is made, and it's a way to check the layout without clicking.
 - `make install-app` is the quick local build: `swiftc` into a hand-made bundle, signed ad hoc, the same as `afm`, copied to `~/Applications`. It's `DeadAir.app` on disk because make can't handle a space in a target name; the menu says "Dead Air". To start it at login, add it in System Settings → General → Login Items.
 
 ## The pieces
